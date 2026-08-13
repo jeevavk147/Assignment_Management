@@ -1,7 +1,10 @@
+import math
 import os
+import random
 import sqlite3
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assignment_app.db")
+UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS USERS (
@@ -36,6 +39,7 @@ CREATE TABLE IF NOT EXISTS ASSIGNMENTS (
     type TEXT NOT NULL CHECK (type IN ('INDIVIDUAL','GROUP')),
     max_marks REAL NOT NULL,
     due_date DATETIME NOT NULL,
+    attachment_path TEXT,
     created_by INTEGER NOT NULL REFERENCES USERS(user_id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -46,6 +50,8 @@ CREATE TABLE IF NOT EXISTS GROUPS (
     group_name TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_assignment_name ON GROUPS(assignment_id, group_name);
 
 CREATE TABLE IF NOT EXISTS GROUP_MEMBERS (
     group_id INTEGER NOT NULL REFERENCES GROUPS(group_id),
@@ -88,7 +94,17 @@ def initialize_db():
     conn = get_connection()
     conn.executescript(SCHEMA)
     conn.commit()
+    _migrate(conn)
     conn.close()
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+
+def _migrate(conn):
+    """Add columns that were introduced after some databases were already created."""
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(ASSIGNMENTS)").fetchall()]
+    if "attachment_path" not in columns:
+        conn.execute("ALTER TABLE ASSIGNMENTS ADD COLUMN attachment_path TEXT")
+        conn.commit()
 
 
 def get_user_by_email(email):
@@ -175,10 +191,30 @@ def enroll_student(student_id, course_id):
     conn.close()
 
 
+def unenroll_student(student_id, course_id):
+    """Drop a student from a course, and scrub them from any groups belonging to
+    that course's assignments so group member counts don't go stale."""
+    conn = get_connection()
+    conn.execute(
+        """DELETE FROM GROUP_MEMBERS WHERE student_id = ? AND group_id IN (
+               SELECT GROUPS.group_id FROM GROUPS
+               JOIN ASSIGNMENTS ON ASSIGNMENTS.assignment_id = GROUPS.assignment_id
+               WHERE ASSIGNMENTS.course_id = ?
+           )""",
+        (student_id, course_id),
+    )
+    conn.execute(
+        "DELETE FROM ENROLLMENTS WHERE student_id = ? AND course_id = ?",
+        (student_id, course_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def list_enrolled_students(course_id):
     conn = get_connection()
     rows = conn.execute(
-        """SELECT USERS.* FROM USERS
+        """SELECT USERS.*, ENROLLMENTS.enrolled_at FROM USERS
            JOIN ENROLLMENTS ON ENROLLMENTS.student_id = USERS.user_id
            WHERE ENROLLMENTS.course_id = ?
            ORDER BY USERS.name""",
@@ -186,3 +222,151 @@ def list_enrolled_students(course_id):
     ).fetchall()
     conn.close()
     return rows
+
+
+def list_students_not_enrolled_in_course(course_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT * FROM USERS
+           WHERE role = 'student'
+           AND user_id NOT IN (SELECT student_id FROM ENROLLMENTS WHERE course_id = ?)
+           ORDER BY name""",
+        (course_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def update_assignment_attachment(assignment_id, attachment_path):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE ASSIGNMENTS SET attachment_path = ? WHERE assignment_id = ?",
+        (attachment_path, assignment_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_assignments_by_faculty(faculty_id, type_=None):
+    conn = get_connection()
+    query = """SELECT ASSIGNMENTS.*, COURSES.course_code, COURSES.course_name
+               FROM ASSIGNMENTS JOIN COURSES ON COURSES.course_id = ASSIGNMENTS.course_id
+               WHERE COURSES.faculty_id = ?"""
+    params = [faculty_id]
+    if type_:
+        query += " AND ASSIGNMENTS.type = ?"
+        params.append(type_)
+    query += " ORDER BY ASSIGNMENTS.due_date"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return rows
+
+
+def create_group(assignment_id, group_name):
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO GROUPS (assignment_id, group_name) VALUES (?, ?)",
+        (assignment_id, group_name),
+    )
+    conn.commit()
+    group_id = cur.lastrowid
+    conn.close()
+    return group_id
+
+
+def list_groups_by_assignment(assignment_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT GROUPS.*, COUNT(GROUP_MEMBERS.student_id) AS member_count
+           FROM GROUPS LEFT JOIN GROUP_MEMBERS ON GROUP_MEMBERS.group_id = GROUPS.group_id
+           WHERE GROUPS.assignment_id = ?
+           GROUP BY GROUPS.group_id
+           ORDER BY GROUPS.group_name""",
+        (assignment_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def list_group_membership_for_assignment(course_id, assignment_id):
+    """Every student enrolled in the course, with whichever group (if any) they hold
+    specifically under this assignment. Never reflects group membership from any
+    other assignment — each assignment's groups are entirely its own."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT USERS.user_id, USERS.name, USERS.email, ag.group_id, ag.group_name
+           FROM USERS
+           JOIN ENROLLMENTS ON ENROLLMENTS.student_id = USERS.user_id AND ENROLLMENTS.course_id = ?
+           LEFT JOIN (
+               SELECT GROUP_MEMBERS.student_id AS student_id,
+                      GROUPS.group_id AS group_id,
+                      GROUPS.group_name AS group_name
+               FROM GROUP_MEMBERS
+               JOIN GROUPS ON GROUPS.group_id = GROUP_MEMBERS.group_id
+               WHERE GROUPS.assignment_id = ?
+           ) AS ag ON ag.student_id = USERS.user_id
+           ORDER BY USERS.name""",
+        (course_id, assignment_id),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def set_student_group(assignment_id, student_id, group_id):
+    """Move a student to `group_id` within this assignment's groups (or unassign with group_id=None)."""
+    conn = get_connection()
+    conn.execute(
+        """DELETE FROM GROUP_MEMBERS WHERE student_id = ? AND group_id IN (
+               SELECT group_id FROM GROUPS WHERE assignment_id = ?
+           )""",
+        (student_id, assignment_id),
+    )
+    if group_id is not None:
+        conn.execute(
+            "INSERT INTO GROUP_MEMBERS (group_id, student_id) VALUES (?, ?)",
+            (group_id, student_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def auto_distribute_groups(course_id, assignment_id, group_size):
+    """Ensure enough "Group N" groups exist to hold every enrolled student at roughly
+    `group_size` students each, then randomly fill in only the currently-unassigned
+    students, topping up whichever groups have the fewest members. Safe to call more
+    than once (e.g. after new students enroll) — never moves someone already placed."""
+    total_enrolled = len(list_enrolled_students(course_id))
+    if total_enrolled == 0 or group_size < 1:
+        return
+    needed_groups = max(1, math.ceil(total_enrolled / group_size))
+
+    existing = list_groups_by_assignment(assignment_id)
+    group_ids = [g["group_id"] for g in existing]
+    existing_names = {g["group_name"] for g in existing}
+
+    next_num = 1
+    while len(group_ids) < needed_groups:
+        name = f"Group {next_num}"
+        next_num += 1
+        if name in existing_names:
+            continue
+        group_ids.append(create_group(assignment_id, name))
+        existing_names.add(name)
+
+    if not group_ids:
+        return
+
+    membership = list_group_membership_for_assignment(course_id, assignment_id)
+    counts = {gid: 0 for gid in group_ids}
+    unassigned = []
+    for m in membership:
+        if m["group_id"] in counts:
+            counts[m["group_id"]] += 1
+        elif m["group_id"] is None:
+            unassigned.append(m)
+
+    random.shuffle(unassigned)
+    for student in unassigned:
+        target = min(counts, key=counts.get)
+        set_student_group(assignment_id, student["user_id"], target)
+        counts[target] += 1

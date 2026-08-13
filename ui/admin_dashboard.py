@@ -4,6 +4,7 @@ from tkinter import ttk, messagebox
 
 from auth import hash_password
 from database import create_user, list_users
+from ui.widgets import ScrollableCard, scrollable_treeview
 
 
 def show(app):
@@ -19,8 +20,9 @@ def show(app):
 
 
 def _build_users_tab(parent):
-    left_frame = ttk.Frame(parent, style="Card.TFrame", padding=24)
-    left_frame.pack(side="left", fill="y", padx=(0, 20), pady=4)
+    left_card = ScrollableCard(parent, width=300)
+    left_card.pack(side="left", fill="y", padx=(0, 20), pady=4)
+    left_frame = left_card.body
 
     right_frame = ttk.Frame(parent, style="Card.TFrame", padding=24)
     right_frame.pack(side="right", fill="both", expand=True, pady=4)
@@ -56,7 +58,7 @@ def _build_users_tab(parent):
     ttk.Label(right_frame, text="All Users", style="SubHeader.Card.TLabel").pack(anchor="w", pady=(0, 14))
 
     columns = ("id", "name", "email", "role", "created")
-    tree = ttk.Treeview(right_frame, columns=columns, show="headings", height=15)
+    tree_container, tree = scrollable_treeview(right_frame, columns)
     for col, label, width in (
         ("id", "ID", 40),
         ("name", "Name", 140),
@@ -66,7 +68,7 @@ def _build_users_tab(parent):
     ):
         tree.heading(col, text=label)
         tree.column(col, width=width, anchor="w")
-    tree.pack(fill="both", expand=True)
+    tree_container.pack(fill="both", expand=True)
 
     def refresh():
         tree.delete(*tree.get_children())
