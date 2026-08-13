@@ -17,6 +17,7 @@ from database import (
     unenroll_student,
     update_assignment_attachment,
 )
+from ui.assignment_details import open_assignment_details
 from ui.date_picker import DateTimeEntry
 from ui.group_editor import open_group_editor
 from ui.theme import PALETTE
@@ -338,8 +339,18 @@ def _build_assignments_list_tab(app, parent):
         if a:
             open_group_editor(app, a["assignment_id"], a["course_id"], a["title"])
 
+    def open_details(event=None):
+        selection = tree.selection()
+        if not selection:
+            return
+        assignment_id = tree.item(selection[0])["values"][0]
+        a = assignment_lookup.get(assignment_id)
+        if a:
+            open_assignment_details(app, a)
+
     edit_groups_button.configure(command=open_selected_groups)
     tree.bind("<<TreeviewSelect>>", on_selection_changed)
+    tree.bind("<Double-1>", open_details)
 
     def refresh():
         tree.delete(*tree.get_children())
