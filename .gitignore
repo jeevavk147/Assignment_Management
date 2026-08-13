@@ -2,3 +2,4 @@ assignment_app.db
 __pycache__/
 *.pyc
 Student_Submissions/
+uploads/
