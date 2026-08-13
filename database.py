@@ -237,6 +237,48 @@ def list_students_not_enrolled_in_course(course_id):
     return rows
 
 
+def list_enrolled_courses(student_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT COURSES.*, USERS.name AS faculty_name, ENROLLMENTS.enrolled_at
+           FROM COURSES
+           JOIN ENROLLMENTS ON ENROLLMENTS.course_id = COURSES.course_id
+           JOIN USERS ON USERS.user_id = COURSES.faculty_id
+           WHERE ENROLLMENTS.student_id = ?
+           ORDER BY COURSES.course_code""",
+        (student_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def create_submission(assignment_id, student_id, file_path):
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO SUBMISSIONS (assignment_id, student_id, file_path) VALUES (?, ?, ?)",
+        (assignment_id, student_id, file_path),
+    )
+    conn.commit()
+    submission_id = cur.lastrowid
+    conn.close()
+    return submission_id
+
+
+def list_submissions_by_student(student_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT SUBMISSIONS.*, ASSIGNMENTS.title, COURSES.course_code
+           FROM SUBMISSIONS
+           JOIN ASSIGNMENTS ON ASSIGNMENTS.assignment_id = SUBMISSIONS.assignment_id
+           JOIN COURSES ON COURSES.course_id = ASSIGNMENTS.course_id
+           WHERE SUBMISSIONS.student_id = ?
+           ORDER BY SUBMISSIONS.submitted_at DESC""",
+        (student_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def update_assignment_attachment(assignment_id, attachment_path):
     conn = get_connection()
     conn.execute(

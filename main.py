@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from database import initialize_db
-from ui import admin_dashboard, faculty_dashboard, login_screen, theme
+from ui import admin_dashboard, faculty_dashboard, login_screen, student_dashboard, theme
 
 
 class AssignmentApp(tk.Tk):
@@ -60,15 +60,7 @@ class AssignmentApp(tk.Tk):
         elif role == "faculty":
             faculty_dashboard.show(self)
         else:
-            # Student dashboard is still the existing prototype (not yet DB-backed) —
-            # left untouched for now, so this is a placeholder only.
-            self.build_header(self.container)
-            ttk.Label(
-                self.container,
-                text="Student dashboard is being migrated from the existing prototype — coming soon.",
-                style="SubHeader.TLabel",
-                padding=20,
-            ).pack(anchor="w")
+            student_dashboard.show(self)
 
 
 if __name__ == "__main__":
