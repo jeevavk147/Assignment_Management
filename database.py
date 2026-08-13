@@ -2,9 +2,18 @@ import math
 import os
 import random
 import sqlite3
+import sys
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assignment_app.db")
-UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+# When PyInstaller freezes this into an .exe, __file__ resolves inside the temporary
+# extraction folder — the database and uploads must instead live next to the .exe
+# itself so they persist across runs.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+DB_PATH = os.path.join(BASE_DIR, "assignment_app.db")
+UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS USERS (
