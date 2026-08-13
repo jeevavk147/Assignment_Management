@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 Student_Submissions/
 uploads/
+build/
+dist/
+release/
+*.spec
