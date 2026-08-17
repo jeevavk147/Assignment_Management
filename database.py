@@ -288,6 +288,16 @@ def list_submissions_by_student(student_id):
     return rows
 
 
+def update_assignment(assignment_id, title, description, max_marks, due_date):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE ASSIGNMENTS SET title = ?, description = ?, max_marks = ?, due_date = ? WHERE assignment_id = ?",
+        (title, description, max_marks, due_date, assignment_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def update_assignment_attachment(assignment_id, attachment_path):
     conn = get_connection()
     conn.execute(

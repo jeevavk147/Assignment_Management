@@ -8,7 +8,7 @@ from ui.widgets import scrollable_treeview
 UNASSIGNED_NODE = "unassigned"
 
 
-def open_group_editor(app, assignment_id, course_id, assignment_title):
+def open_group_editor(app, assignment_id, course_id, assignment_title, on_change=None):
     """Per-assignment group roster: only students enrolled in `course_id`, only groups
     belonging to `assignment_id`. Nothing here is shared with any other assignment.
 
@@ -130,6 +130,8 @@ def open_group_editor(app, assignment_id, course_id, assignment_title):
             return
         auto_distribute_groups(course_id, assignment_id, size)
         refresh_roster()
+        if on_change:
+            on_change()
 
     def selected_student():
         selection = tree.selection()
@@ -144,6 +146,8 @@ def open_group_editor(app, assignment_id, course_id, assignment_title):
             return
         set_student_group(assignment_id, student_id, None)
         refresh_roster()
+        if on_change:
+            on_change()
 
     generate_button.configure(command=generate_click)
     remove_button.configure(command=remove_click)
@@ -176,6 +180,8 @@ def open_group_editor(app, assignment_id, course_id, assignment_title):
         student_id = student_id_from_item(dragged)
         set_student_group(assignment_id, student_id, node_to_group_id.get(target_node))
         refresh_roster()
+        if on_change:
+            on_change()
 
     tree.bind("<ButtonPress-1>", on_press)
     tree.bind("<B1-Motion>", on_motion)

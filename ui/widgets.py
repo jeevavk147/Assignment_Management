@@ -32,10 +32,18 @@ class ScrollableCard(ttk.Frame):
         canvas.bind("<Configure>", on_canvas_configure)
 
         def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            if canvas.winfo_exists():
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def unbind_mousewheel(event=None):
+            canvas.unbind_all("<MouseWheel>")
 
         canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", on_mousewheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        canvas.bind("<Leave>", unbind_mousewheel)
+        # A popup can be destroyed (e.g. "Close") while the mouse is still over its
+        # canvas, so <Leave> never fires — without this, bind_all is left dangling
+        # and the next scroll anywhere in the app throws (target widget is gone).
+        canvas.bind("<Destroy>", unbind_mousewheel)
 
 
 def scrollable_treeview(parent, columns, height=15, show="headings"):
