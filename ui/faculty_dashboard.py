@@ -346,7 +346,7 @@ def _build_assignments_list_tab(app, parent):
         assignment_id = tree.item(selection[0])["values"][0]
         a = assignment_lookup.get(assignment_id)
         if a:
-            open_assignment_details(app, a)
+            open_assignment_details(app, a, on_updated=refresh)
 
     edit_groups_button.configure(command=open_selected_groups)
     tree.bind("<<TreeviewSelect>>", on_selection_changed)

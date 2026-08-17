@@ -11,6 +11,7 @@ from database import (
     list_enrolled_courses,
     list_submissions_by_student,
 )
+from ui.assignment_details import open_assignment_details
 from ui.theme import PALETTE
 from ui.widgets import ScrollableCard, scrollable_treeview
 
@@ -21,18 +22,78 @@ def show(app):
     notebook = ttk.Notebook(app.container)
     notebook.pack(fill="both", expand=True, padx=24, pady=(20, 24))
 
+    assignments_tab = ttk.Frame(notebook, padding=0)
     submit_tab = ttk.Frame(notebook, padding=0)
     courses_tab = ttk.Frame(notebook, padding=0)
 
+    notebook.add(assignments_tab, text="  Assignments  ")
     notebook.add(submit_tab, text="  Submit Assignment  ")
     notebook.add(courses_tab, text="  My Courses  ")
 
+    _build_assignments_tab(app, assignments_tab)
     _build_submit_tab(app, submit_tab)
     _build_courses_tab(app, courses_tab)
 
 
 def _my_enrolled_courses(app):
     return list_enrolled_courses(app.current_user["user_id"])
+
+
+def _build_assignments_tab(app, parent):
+    frame = ttk.Frame(parent, style="Card.TFrame", padding=24)
+    frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+    ttk.Label(frame, text="Assignments", style="SubHeader.Card.TLabel").pack(anchor="w", pady=(0, 4))
+    ttk.Label(
+        frame, text="Double-click an assignment to see full details.", style="Muted.Card.TLabel"
+    ).pack(anchor="w", pady=(0, 14))
+
+    columns = ("course", "title", "type", "max_marks", "due", "file")
+    tree_container, tree = scrollable_treeview(frame, columns, height=16)
+    for col, label, width in (
+        ("course", "Course", 90),
+        ("title", "Title", 220),
+        ("type", "Type", 90),
+        ("max_marks", "Max", 60),
+        ("due", "Due", 140),
+        ("file", "Attachment", 120),
+    ):
+        tree.heading(col, text=label)
+        tree.column(col, width=width, anchor="w")
+    tree_container.pack(fill="both", expand=True)
+
+    assignment_lookup = {}
+
+    def open_details(event=None):
+        selection = tree.selection()
+        if not selection:
+            return
+        a = assignment_lookup.get(selection[0])
+        if a:
+            open_assignment_details(app, a)
+
+    tree.bind("<Double-1>", open_details)
+
+    def refresh():
+        tree.delete(*tree.get_children())
+        assignment_lookup.clear()
+        for course in _my_enrolled_courses(app):
+            for a in list_assignments_by_course(course["course_id"]):
+                enriched = dict(a)
+                enriched["course_code"] = course["course_code"]
+                enriched["course_name"] = course["course_name"]
+                iid = f"a{a['assignment_id']}"
+                assignment_lookup[iid] = enriched
+                file_name = os.path.basename(a["attachment_path"]) if a["attachment_path"] else "—"
+                tree.insert(
+                    "", "end", iid=iid,
+                    values=(
+                        course["course_code"], a["title"], a["type"], a["max_marks"], a["due_date"], file_name,
+                    ),
+                )
+
+    refresh()
+    return refresh
 
 
 def _build_submit_tab(app, parent):
@@ -112,8 +173,20 @@ def _build_submit_tab(app, parent):
             for a in list_assignments_by_course(course_id):
                 if a["type"] != "INDIVIDUAL":
                     continue
-                labels.append(a["title"])
-                assignment_lookup[a["title"]] = a["assignment_id"]
+                # Keying/labeling by title alone breaks when two assignments share a
+                # title (a real occurrence, not hypothetical) — whichever was
+                # processed last silently wins the dict slot, so picking the other
+                # one from the dropdown would still submit against the wrong
+                # assignment_id. Folding the due date in, with a numbered fallback,
+                # keeps every label distinct.
+                label = f"{a['title']}  (due {a['due_date']})"
+                suffix = 2
+                unique_label = label
+                while unique_label in assignment_lookup:
+                    unique_label = f"{label} #{suffix}"
+                    suffix += 1
+                assignment_lookup[unique_label] = a["assignment_id"]
+                labels.append(unique_label)
         assignment_dropdown["values"] = labels
         assignment_var.set(labels[0] if labels else "")
 
