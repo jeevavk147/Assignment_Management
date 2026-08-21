@@ -8,10 +8,12 @@ from database import (
     UPLOADS_DIR,
     list_group_membership_for_assignment,
     list_groups_by_assignment,
+    list_submissions_for_assignment,
     update_assignment,
     update_assignment_attachment,
 )
 from ui.date_picker import DateTimeEntry
+from ui.grading import open_grade_entry_dialog
 from ui.group_editor import open_group_editor
 from ui.theme import PALETTE
 from ui.widgets import ScrollableCard, scrollable_treeview
@@ -25,7 +27,9 @@ def open_assignment_details(app, assignment, on_updated=None):
 
     GROUP assignments get a second tab showing their groups (view-only for everyone;
     editing membership stays in the Groups editor, reachable here via "Manage Groups"
-    for faculty only)."""
+    for faculty only). Faculty also get a Submissions tab (any type) to see who's
+    turned something in and enter grades — never shown to students, since it would
+    expose other students' submissions."""
     editable = app.current_user["role"] == "faculty"
 
     popup = tk.Toplevel(app)
@@ -50,17 +54,21 @@ def open_assignment_details(app, assignment, on_updated=None):
         style="Muted.Card.TLabel",
     ).pack(anchor="w", pady=(4, 0))
 
+    tabs = [("Details", lambda parent: _build_details(parent, assignment, editable, on_updated, popup, header_title_label))]
     if assignment["type"] == "GROUP":
+        tabs.append(("Groups", lambda parent: _build_groups_view(app, parent, assignment, editable)))
+    if editable:
+        tabs.append(("Submissions", lambda parent: _build_submissions_view(app, parent, assignment)))
+
+    if len(tabs) > 1:
         notebook = ttk.Notebook(popup)
         notebook.pack(side="top", fill="both", expand=True, padx=24, pady=(12, 0))
-        details_tab = ttk.Frame(notebook, padding=0)
-        groups_tab = ttk.Frame(notebook, padding=0)
-        notebook.add(details_tab, text="  Details  ")
-        notebook.add(groups_tab, text="  Groups  ")
-        _build_details(details_tab, assignment, editable, on_updated, popup, header_title_label)
-        _build_groups_view(app, groups_tab, assignment, editable)
+        for label, builder in tabs:
+            tab_frame = ttk.Frame(notebook, padding=0)
+            notebook.add(tab_frame, text=f"  {label}  ")
+            builder(tab_frame)
     else:
-        _build_details(popup, assignment, editable, on_updated, popup, header_title_label)
+        tabs[0][1](popup)
 
     popup.update_idletasks()
     x = app.winfo_rootx() + 60
@@ -312,4 +320,63 @@ def _build_groups_view(app, parent, assignment, editable):
             ),
         ).pack(side="right")
 
+    refresh()
+
+
+def _build_submissions_view(app, parent, assignment):
+    frame = ttk.Frame(parent, style="Card.TFrame", padding=24)
+    frame.pack(side="top", fill="both", expand=True, padx=4, pady=4)
+
+    ttk.Label(frame, text="Submissions", style="SubHeader.Card.TLabel").pack(anchor="w", pady=(0, 4))
+    ttk.Label(
+        frame, text="Double-click a row to enter or update its grade.", style="Muted.Card.TLabel"
+    ).pack(anchor="w", pady=(0, 14))
+
+    columns = ("submitter", "file", "submitted", "grade")
+    tree_container, tree = scrollable_treeview(frame, columns, height=14)
+    for col, label, width in (
+        ("submitter", "Submitted By", 160),
+        ("file", "File", 220),
+        ("submitted", "Submitted At", 150),
+        ("grade", "Grade", 100),
+    ):
+        tree.heading(col, text=label)
+        tree.column(col, width=width, anchor="w")
+    tree_container.pack(fill="both", expand=True)
+
+    empty_label = ttk.Label(frame, text="No submissions yet.", style="Muted.Card.TLabel")
+    submission_lookup = {}
+
+    def refresh():
+        tree.delete(*tree.get_children())
+        submission_lookup.clear()
+        empty_label.pack_forget()
+
+        submissions = list_submissions_for_assignment(assignment["assignment_id"])
+        if not submissions:
+            empty_label.pack(anchor="w", pady=(8, 0))
+            return
+
+        for s in submissions:
+            submitter = s["student_name"] or s["group_name"] or "Unknown"
+            grade_text = (
+                f"{s['marks_obtained']} / {assignment['max_marks']}"
+                if s["marks_obtained"] is not None else "Not graded"
+            )
+            iid = f"sub{s['submission_id']}"
+            submission_lookup[iid] = s
+            tree.insert(
+                "", "end", iid=iid,
+                values=(submitter, os.path.basename(s["file_path"]), s["submitted_at"], grade_text),
+            )
+
+    def open_grading(event=None):
+        selection = tree.selection()
+        if not selection:
+            return
+        s = submission_lookup.get(selection[0])
+        if s:
+            open_grade_entry_dialog(app, s, assignment, on_saved=refresh)
+
+    tree.bind("<Double-1>", open_grading)
     refresh()

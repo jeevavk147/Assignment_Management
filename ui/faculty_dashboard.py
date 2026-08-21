@@ -14,11 +14,13 @@ from database import (
     list_courses_by_faculty,
     list_enrolled_students,
     list_students_not_enrolled_in_course,
+    list_submissions_for_faculty,
     unenroll_student,
     update_assignment_attachment,
 )
 from ui.assignment_details import open_assignment_details
 from ui.date_picker import DateTimeEntry
+from ui.grading import open_grade_entry_dialog
 from ui.group_editor import open_group_editor
 from ui.theme import PALETTE
 from ui.widgets import ScrollableCard, scrollable_treeview
@@ -33,16 +35,19 @@ def show(app):
     courses_tab = ttk.Frame(notebook, padding=0)
     create_assignment_tab = ttk.Frame(notebook, padding=0)
     assignments_list_tab = ttk.Frame(notebook, padding=0)
+    submissions_tab = ttk.Frame(notebook, padding=0)
     enrollment_tab = ttk.Frame(notebook, padding=0)
 
     notebook.add(courses_tab, text="  My Courses  ")
     notebook.add(create_assignment_tab, text="  Create Assignment  ")
     notebook.add(assignments_list_tab, text="  Assignments  ")
+    notebook.add(submissions_tab, text="  Submissions  ")
     notebook.add(enrollment_tab, text="  Enrollment  ")
 
     # Built before the courses/create-assignment tabs so those tabs can trigger their refreshes.
     refresh_enrollment_courses = _build_enrollment_tab(app, enrollment_tab)
     refresh_assignments_list = _build_assignments_list_tab(app, assignments_list_tab)
+    _build_submissions_tab(app, submissions_tab)
     refresh_create_assignment_courses = _build_create_assignment_tab(
         app, create_assignment_tab, on_assignment_created=refresh_assignments_list,
     )
@@ -364,6 +369,73 @@ def _build_assignments_list_tab(app, parent):
             )
         on_selection_changed()
 
+    refresh()
+    return refresh
+
+
+def _build_submissions_tab(app, parent):
+    frame = ttk.Frame(parent, style="Card.TFrame", padding=24)
+    frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+    ttk.Label(frame, text="Submission History", style="SubHeader.Card.TLabel").pack(anchor="w", pady=(0, 4))
+    ttk.Label(
+        frame, text="Every submission across your courses. Double-click a row to grade it.",
+        style="Muted.Card.TLabel",
+    ).pack(anchor="w", pady=(0, 14))
+
+    columns = ("course", "assignment", "submitter", "file", "submitted", "grade")
+    tree_container, tree = scrollable_treeview(frame, columns, height=18)
+    for col, label, width in (
+        ("course", "Course", 80),
+        ("assignment", "Assignment", 180),
+        ("submitter", "Submitted By", 140),
+        ("file", "File", 160),
+        ("submitted", "Submitted At", 140),
+        ("grade", "Grade", 100),
+    ):
+        tree.heading(col, text=label)
+        tree.column(col, width=width, anchor="w")
+    tree_container.pack(fill="both", expand=True)
+
+    empty_label = ttk.Label(frame, text="No submissions yet across your courses.", style="Muted.Card.TLabel")
+    submission_lookup = {}
+
+    def refresh():
+        tree.delete(*tree.get_children())
+        submission_lookup.clear()
+        empty_label.pack_forget()
+
+        submissions = list_submissions_for_faculty(app.current_user["user_id"])
+        if not submissions:
+            empty_label.pack(anchor="w", pady=(8, 0))
+            return
+
+        for s in submissions:
+            submitter = s["student_name"] or s["group_name"] or "Unknown"
+            grade_text = (
+                f"{s['marks_obtained']} / {s['max_marks']}"
+                if s["marks_obtained"] is not None else "Not graded"
+            )
+            iid = f"sub{s['submission_id']}"
+            submission_lookup[iid] = s
+            tree.insert(
+                "", "end", iid=iid,
+                values=(
+                    s["course_code"], s["assignment_title"], submitter,
+                    os.path.basename(s["file_path"]), s["submitted_at"], grade_text,
+                ),
+            )
+
+    def open_grading(event=None):
+        selection = tree.selection()
+        if not selection:
+            return
+        s = submission_lookup.get(selection[0])
+        if s:
+            assignment_stub = {"title": s["assignment_title"], "max_marks": s["max_marks"]}
+            open_grade_entry_dialog(app, s, assignment_stub, on_saved=refresh)
+
+    tree.bind("<Double-1>", open_grading)
     refresh()
     return refresh
 

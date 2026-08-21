@@ -8,6 +8,7 @@ PALETTE = {
     "accent_hover": "#4338ca",
     "accent_soft": "#eef0fd",
     "danger": "#dc2626",
+    "warning": "#b45309",
 }
 
 

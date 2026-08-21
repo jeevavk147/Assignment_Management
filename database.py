@@ -276,16 +276,88 @@ def create_submission(assignment_id, student_id, file_path):
 def list_submissions_by_student(student_id):
     conn = get_connection()
     rows = conn.execute(
-        """SELECT SUBMISSIONS.*, ASSIGNMENTS.title, COURSES.course_code
+        """SELECT SUBMISSIONS.*, ASSIGNMENTS.title, ASSIGNMENTS.max_marks, COURSES.course_code,
+                  GRADES.marks_obtained, GRADES.feedback, GRADES.graded_at
            FROM SUBMISSIONS
            JOIN ASSIGNMENTS ON ASSIGNMENTS.assignment_id = SUBMISSIONS.assignment_id
            JOIN COURSES ON COURSES.course_id = ASSIGNMENTS.course_id
+           LEFT JOIN GRADES ON GRADES.submission_id = SUBMISSIONS.submission_id
            WHERE SUBMISSIONS.student_id = ?
            ORDER BY SUBMISSIONS.submitted_at DESC""",
         (student_id,),
     ).fetchall()
     conn.close()
     return rows
+
+
+def list_submissions_for_assignment(assignment_id):
+    """Every submission for one assignment (individual or group), with the
+    submitter's display name and any existing grade — the faculty grading view."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT SUBMISSIONS.*,
+                  USERS.name AS student_name,
+                  GROUPS.group_name AS group_name,
+                  GRADES.grade_id, GRADES.marks_obtained, GRADES.feedback, GRADES.graded_at
+           FROM SUBMISSIONS
+           LEFT JOIN USERS ON USERS.user_id = SUBMISSIONS.student_id
+           LEFT JOIN GROUPS ON GROUPS.group_id = SUBMISSIONS.group_id
+           LEFT JOIN GRADES ON GRADES.submission_id = SUBMISSIONS.submission_id
+           WHERE SUBMISSIONS.assignment_id = ?
+           ORDER BY SUBMISSIONS.submitted_at DESC""",
+        (assignment_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def list_submissions_for_faculty(faculty_id):
+    """Every submission across all of this faculty member's courses — the
+    consolidated submission history / grading queue, independent of which
+    assignment it belongs to."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT SUBMISSIONS.*,
+                  ASSIGNMENTS.title AS assignment_title, ASSIGNMENTS.max_marks,
+                  COURSES.course_code, COURSES.course_name,
+                  USERS.name AS student_name,
+                  GROUPS.group_name AS group_name,
+                  GRADES.marks_obtained, GRADES.feedback, GRADES.graded_at
+           FROM SUBMISSIONS
+           JOIN ASSIGNMENTS ON ASSIGNMENTS.assignment_id = SUBMISSIONS.assignment_id
+           JOIN COURSES ON COURSES.course_id = ASSIGNMENTS.course_id
+           LEFT JOIN USERS ON USERS.user_id = SUBMISSIONS.student_id
+           LEFT JOIN GROUPS ON GROUPS.group_id = SUBMISSIONS.group_id
+           LEFT JOIN GRADES ON GRADES.submission_id = SUBMISSIONS.submission_id
+           WHERE COURSES.faculty_id = ?
+           ORDER BY SUBMISSIONS.submitted_at DESC""",
+        (faculty_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def create_or_update_grade(submission_id, marks_obtained, feedback, graded_by):
+    """One grade per submission (GRADES.submission_id is UNIQUE) — re-grading
+    updates the existing row instead of inserting a second one."""
+    conn = get_connection()
+    existing = conn.execute(
+        "SELECT grade_id FROM GRADES WHERE submission_id = ?", (submission_id,)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """UPDATE GRADES SET marks_obtained = ?, feedback = ?, graded_by = ?,
+                                  graded_at = CURRENT_TIMESTAMP
+               WHERE submission_id = ?""",
+            (marks_obtained, feedback, graded_by, submission_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO GRADES (submission_id, marks_obtained, feedback, graded_by) VALUES (?, ?, ?, ?)",
+            (submission_id, marks_obtained, feedback, graded_by),
+        )
+    conn.commit()
+    conn.close()
 
 
 def update_assignment(assignment_id, title, description, max_marks, due_date):
@@ -306,6 +378,35 @@ def update_assignment_attachment(assignment_id, attachment_path):
     )
     conn.commit()
     conn.close()
+
+
+def list_assignments_for_student_with_status(student_id):
+    """Every assignment across the student's enrolled courses, annotated with
+    whether they (individually) or their group have already submitted —
+    backs both the Assignments tab's status column and the deadline banner."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT ASSIGNMENTS.*, COURSES.course_code, COURSES.course_name,
+                  EXISTS (
+                      SELECT 1 FROM SUBMISSIONS
+                      WHERE SUBMISSIONS.assignment_id = ASSIGNMENTS.assignment_id
+                      AND SUBMISSIONS.student_id = ?
+                  ) AS submitted_individually,
+                  EXISTS (
+                      SELECT 1 FROM SUBMISSIONS
+                      JOIN GROUP_MEMBERS ON GROUP_MEMBERS.group_id = SUBMISSIONS.group_id
+                      WHERE SUBMISSIONS.assignment_id = ASSIGNMENTS.assignment_id
+                      AND GROUP_MEMBERS.student_id = ?
+                  ) AS submitted_as_group
+           FROM ASSIGNMENTS
+           JOIN COURSES ON COURSES.course_id = ASSIGNMENTS.course_id
+           JOIN ENROLLMENTS ON ENROLLMENTS.course_id = COURSES.course_id
+           WHERE ENROLLMENTS.student_id = ?
+           ORDER BY ASSIGNMENTS.due_date""",
+        (student_id, student_id, student_id),
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def list_assignments_by_faculty(faculty_id, type_=None):

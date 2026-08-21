@@ -8,7 +8,7 @@ Location: `tests/`. Pure `unittest` (Python standard library) — no extra packa
 python -m unittest discover -s tests -v
 ```
 
-39 tests, ~12s, all passing. Run one file at a time, in build-up order:
+49 tests, ~13s, all passing. Run one file at a time, in build-up order:
 
 ```
 python -m unittest tests.test_auth -v
@@ -115,7 +115,7 @@ class LoginTests(IsolatedDBTestCase):
         self.assertIsNone(login("nobody@example.com", "secret123"))
 ```
 
-### `tests/test_database.py` — CRUD + constraints (28 tests)
+### `tests/test_database.py` — CRUD + constraints (38 tests)
 - **Users**: create/lookup by email, duplicate email rejected (`UNIQUE`),
   invalid role rejected (`CHECK`), filter by role.
 - **Courses**: create/list by faculty, duplicate course code rejected.
@@ -128,6 +128,20 @@ class LoginTests(IsolatedDBTestCase):
 - **Submissions**: create/list, the `SUBMISSIONS` table's CHECK constraint
   rejects a row with neither `student_id` nor `group_id` set, and rejects a
   row with both set.
+- **Grading**: an ungraded submission reports `marks_obtained = None` to both
+  faculty and student views; `create_or_update_grade` is visible from both
+  `list_submissions_for_assignment` (faculty) and `list_submissions_by_student`
+  (student) after grading; re-grading updates the existing `GRADES` row in
+  place rather than inserting a second one (`GRADES.submission_id` is
+  `UNIQUE`); a group submission reports `group_name`, not `student_name`;
+  `list_submissions_for_faculty` spans every course they teach and never
+  leaks another faculty member's submissions.
+- **Deadline status**: `list_assignments_for_student_with_status` correctly
+  flags an unsubmitted assignment as not-submitted, flips to
+  `submitted_individually` after an individual submission, flips to
+  `submitted_as_group` when the student's group (via `GROUP_MEMBERS`)
+  submitted instead, and only ever includes courses the student is actually
+  enrolled in.
 - **Groups**: duplicate group name rejected per assignment, moving a student
   between groups updates member counts correctly, unassigning works, group
   membership is scoped per-assignment (the same student in two different
@@ -318,6 +332,151 @@ class SubmissionTests(IsolatedDBTestCase):
                 (self.assignment_id, self.student_id, group_id, "/fake/path.pdf"),
             )
         conn.close()
+
+
+class GradingTests(IsolatedDBTestCase):
+    def setUp(self):
+        super().setUp()
+        self.faculty_id = database.create_user("Dr. Fac", "fac@example.com", hash_password("pw"), "faculty")
+        self.student_id = database.create_user("Stu", "stu@example.com", hash_password("pw"), "student")
+        self.course_id = database.create_course("CS101", "Intro to CS", self.faculty_id)
+        database.enroll_student(self.student_id, self.course_id)
+        self.assignment_id = database.create_assignment(
+            self.course_id, "HW1", "desc", "INDIVIDUAL", 100, "2026-10-01 23:59", self.faculty_id
+        )
+        self.submission_id = database.create_submission(self.assignment_id, self.student_id, "/fake/hw1.pdf")
+
+    def test_ungraded_submission_shows_no_marks(self):
+        submissions = database.list_submissions_for_assignment(self.assignment_id)
+        self.assertEqual(len(submissions), 1)
+        self.assertIsNone(submissions[0]["marks_obtained"])
+        self.assertEqual(submissions[0]["student_name"], "Stu")
+
+        by_student = database.list_submissions_by_student(self.student_id)
+        self.assertIsNone(by_student[0]["marks_obtained"])
+
+    def test_create_grade_then_visible_to_faculty_and_student(self):
+        database.create_or_update_grade(self.submission_id, 85, "Good work", self.faculty_id)
+
+        for_faculty = database.list_submissions_for_assignment(self.assignment_id)[0]
+        self.assertEqual(for_faculty["marks_obtained"], 85)
+        self.assertEqual(for_faculty["feedback"], "Good work")
+
+        for_student = database.list_submissions_by_student(self.student_id)[0]
+        self.assertEqual(for_student["marks_obtained"], 85)
+        self.assertEqual(for_student["feedback"], "Good work")
+        self.assertEqual(for_student["max_marks"], 100)
+
+    def test_regrading_updates_in_place_not_a_second_row(self):
+        database.create_or_update_grade(self.submission_id, 70, "First pass", self.faculty_id)
+        database.create_or_update_grade(self.submission_id, 90, "Revised after resubmission talk", self.faculty_id)
+
+        conn = database.get_connection()
+        rows = conn.execute(
+            "SELECT * FROM GRADES WHERE submission_id = ?", (self.submission_id,)
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["marks_obtained"], 90)
+        self.assertEqual(rows[0]["feedback"], "Revised after resubmission talk")
+
+    def test_group_submission_reports_group_name_not_student_name(self):
+        group_assignment_id = database.create_assignment(
+            self.course_id, "Team HW", "desc", "GROUP", 50, "2026-10-01 23:59", self.faculty_id
+        )
+        group_id = database.create_group(group_assignment_id, "Group 1")
+        conn = database.get_connection()
+        conn.execute(
+            "INSERT INTO SUBMISSIONS (assignment_id, student_id, group_id, file_path) VALUES (?, NULL, ?, ?)",
+            (group_assignment_id, group_id, "/fake/team.pdf"),
+        )
+        conn.commit()
+        conn.close()
+
+        submissions = database.list_submissions_for_assignment(group_assignment_id)
+        self.assertEqual(submissions[0]["group_name"], "Group 1")
+        self.assertIsNone(submissions[0]["student_name"])
+
+    def test_faculty_submission_history_spans_all_their_courses(self):
+        other_course_id = database.create_course("CS102", "Other Course", self.faculty_id)
+        other_assignment_id = database.create_assignment(
+            other_course_id, "HW2", "desc", "INDIVIDUAL", 20, "2026-10-05 23:59", self.faculty_id
+        )
+        database.enroll_student(self.student_id, other_course_id)
+        database.create_submission(other_assignment_id, self.student_id, "/fake/hw2.pdf")
+
+        history = database.list_submissions_for_faculty(self.faculty_id)
+        self.assertEqual(len(history), 2)
+        self.assertEqual({h["assignment_title"] for h in history}, {"HW1", "HW2"})
+
+    def test_submission_history_does_not_leak_other_faculty(self):
+        other_faculty_id = database.create_user(
+            "Dr. Other", "other@example.com", hash_password("pw"), "faculty"
+        )
+        other_course_id = database.create_course("CS900", "Not Mine", other_faculty_id)
+        database.enroll_student(self.student_id, other_course_id)
+        other_assignment_id = database.create_assignment(
+            other_course_id, "Other HW", "desc", "INDIVIDUAL", 20, "2026-10-05 23:59", other_faculty_id
+        )
+        database.create_submission(other_assignment_id, self.student_id, "/fake/other.pdf")
+
+        my_history = database.list_submissions_for_faculty(self.faculty_id)
+        self.assertEqual(len(my_history), 1)
+        self.assertEqual(my_history[0]["assignment_title"], "HW1")
+
+
+class DeadlineStatusTests(IsolatedDBTestCase):
+    def setUp(self):
+        super().setUp()
+        self.faculty_id = database.create_user("Dr. Fac", "fac@example.com", hash_password("pw"), "faculty")
+        self.student_id = database.create_user("Stu", "stu@example.com", hash_password("pw"), "student")
+        self.course_id = database.create_course("CS101", "Intro to CS", self.faculty_id)
+        database.enroll_student(self.student_id, self.course_id)
+
+    def test_unsubmitted_individual_assignment_flagged_correctly(self):
+        database.create_assignment(
+            self.course_id, "HW1", "desc", "INDIVIDUAL", 100, "2026-10-01 23:59", self.faculty_id
+        )
+        rows = database.list_assignments_for_student_with_status(self.student_id)
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["submitted_individually"])
+        self.assertFalse(rows[0]["submitted_as_group"])
+
+    def test_individual_submission_marks_submitted_individually(self):
+        assignment_id = database.create_assignment(
+            self.course_id, "HW1", "desc", "INDIVIDUAL", 100, "2026-10-01 23:59", self.faculty_id
+        )
+        database.create_submission(assignment_id, self.student_id, "/fake/hw1.pdf")
+        rows = database.list_assignments_for_student_with_status(self.student_id)
+        self.assertTrue(rows[0]["submitted_individually"])
+        self.assertFalse(rows[0]["submitted_as_group"])
+
+    def test_group_submission_via_membership_marks_submitted_as_group(self):
+        assignment_id = database.create_assignment(
+            self.course_id, "Team HW", "desc", "GROUP", 100, "2026-10-01 23:59", self.faculty_id
+        )
+        group_id = database.create_group(assignment_id, "Group 1")
+        database.set_student_group(assignment_id, self.student_id, group_id)
+        conn = database.get_connection()
+        conn.execute(
+            "INSERT INTO SUBMISSIONS (assignment_id, student_id, group_id, file_path) VALUES (?, NULL, ?, ?)",
+            (assignment_id, group_id, "/fake/team.pdf"),
+        )
+        conn.commit()
+        conn.close()
+
+        rows = database.list_assignments_for_student_with_status(self.student_id)
+        self.assertFalse(rows[0]["submitted_individually"])
+        self.assertTrue(rows[0]["submitted_as_group"])
+
+    def test_only_this_students_enrolled_courses_are_included(self):
+        other_course_id = database.create_course("CS999", "Not Enrolled", self.faculty_id)
+        database.create_assignment(
+            other_course_id, "Not Mine", "desc", "INDIVIDUAL", 100, "2026-10-01 23:59", self.faculty_id
+        )
+        rows = database.list_assignments_for_student_with_status(self.student_id)
+        self.assertEqual(rows, [])
 
 
 class GroupTests(IsolatedDBTestCase):
